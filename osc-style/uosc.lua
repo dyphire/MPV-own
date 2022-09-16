@@ -14,6 +14,7 @@ local utils = require('mp.utils')
 local msg = require('mp.msg')
 local osd = mp.create_osd_overlay('ass-events')
 local infinity = 1e309
+local quarter_pi_sin = math.sin(math.pi / 4)
 
 --[[ BASE HELPERS ]]
 
@@ -168,9 +169,9 @@ local options = {
 
 	volume = 'right',
 	volume_size = 40,
-	volume_size_fullscreen = 60,
+	volume_size_fullscreen = 52,
 	volume_persistency = '',
-	volume_opacity = 0.8,
+	volume_opacity = 0.9,
 	volume_border = 1,
 	volume_step = 1,
 
@@ -200,6 +201,7 @@ local options = {
 
 	ui_scale = 1,
 	font_scale = 1,
+	text_border = 1.2,
 	pause_on_click_shorter_than = 0,
 	flash_duration = 1000,
 	proximity_in = 40,
@@ -245,7 +247,10 @@ local config = {
 		return parts[1] and {color = parts[1], opacity = tonumber(parts[2])} or nil
 	end)(),
 	menu_items = (function()
-		local input_conf_path = mp.command_native({'expand-path', '~~/input.conf'})
+		local input_conf_property = mp.get_property_native('input-conf');
+		local input_conf_path = mp.command_native({
+			'expand-path', input_conf_property == '' and '~~/input.conf' or input_conf_property,
+		})
 		local input_conf_meta, meta_error = utils.file_info(input_conf_path)
 
 		-- File doesn't exist
@@ -365,7 +370,7 @@ local state = {
 	end)(),
 	cwd = mp.get_property('working-directory'),
 	path = nil, -- current file path or URL
-	media_title = '',
+	title = nil,
 	time = nil, -- current media playback time
 	speed = 1,
 	duration = nil, -- current media duration
@@ -382,12 +387,14 @@ local state = {
 	volume = nil,
 	volume_max = nil,
 	mute = nil,
-	is_video = nil,
-	is_audio = nil, -- true if file is audio only (mp3, etc)
-	is_image = nil,
-	is_stream = nil,
-	has_audio = nil,
-	has_playlist = nil,
+	is_video = false,
+	is_audio = false, -- true if file is audio only (mp3, etc)
+	is_image = false,
+	is_stream = false,
+	has_audio = false,
+	has_sub = false,
+	has_chapter = false,
+	has_playlist = false,
 	cursor_autohide_timer = mp.add_timeout(mp.get_property_native('cursor-autohide') / 1000, function()
 		if not options.autohide then return end
 		handle_mouse_leave()
@@ -599,8 +606,8 @@ end
 ---@param point {x: number; y: number}
 ---@param rect {ax: number; ay: number; bx: number; by: number}
 function get_point_to_rectangle_proximity(point, rect)
-	local dx = math.max(rect.ax - point.x, 0, point.x - rect.bx + 1)
-	local dy = math.max(rect.ay - point.y, 0, point.y - rect.by + 1)
+	local dx = math.max(rect.ax - point.x, 0, point.x - rect.bx)
+	local dy = math.max(rect.ay - point.y, 0, point.y - rect.by)
 	return math.sqrt(dx * dx + dy * dy);
 end
 
@@ -1010,7 +1017,7 @@ end
 function ass_mt:tooltip(element, value, opts)
 	opts = opts or {}
 	opts.size = opts.size or 16
-	opts.border = 1
+	opts.border = options.text_border
 	opts.border_color = options.color_background
 	local offset = opts.offset or opts.size / 2
 	local align_top = element.ay - offset > opts.size * 5
@@ -1028,7 +1035,7 @@ end
 ---@param ay number
 ---@param bx number
 ---@param by number
----@param opts? {color?: string; border?: number; border_color?: string; opacity?: number; border_opacity?: number; clip?: string, radius?: number}
+---@param opts? {color?: string; border?: number; border_color?: string; opacity?: number; clip?: string, radius?: number}
 function ass_mt:rect(ax, ay, bx, by, opts)
 	opts = opts or {}
 	local border_size = opts.border or 0
@@ -1042,11 +1049,7 @@ function ass_mt:rect(ax, ay, bx, by, opts)
 	end
 	-- opacity
 	if opts.opacity then
-		tags = tags .. string.format('\\1a&H%X&', opacity_to_alpha(opts.opacity))
-	end
-	-- border opacity
-	if opts.border_opacity then
-		tags = tags .. string.format('\\3a&H%X&', opacity_to_alpha(opts.border_opacity))
+		tags = tags .. string.format('\\alpha&H%X&', opacity_to_alpha(opts.opacity))
 	end
 	-- clip
 	if opts.clip then
@@ -1162,6 +1165,21 @@ function Elements:update_proximities()
 	-- Trigger `mouse_leave` and `mouse_enter` events
 	for _, element in ipairs(mouse_leave_elements) do element:trigger('mouse_leave') end
 	for _, element in ipairs(mouse_enter_elements) do element:trigger('mouse_enter') end
+end
+
+-- Toggles elements visibility between 0 and 1.
+---@param elements string[] IDs of elements to peek.
+function Elements:peek(elements)
+	local highest_visibility = 0
+	for _, name in ipairs(elements) do
+		local visibility = self[name] and self[name]:get_visibility() or 0
+		if visibility > highest_visibility then highest_visibility = visibility end
+	end
+	local to = highest_visibility > 0.5 and 0 or 1
+	for _, name in ipairs(elements) do
+		local element = self[name]
+		if element then element:tween_property('proximity', element.proximity, to) end
+	end
 end
 
 ---@param name string Event name.
@@ -1924,13 +1942,13 @@ function Menu:on_global_mouse_move()
 end
 
 function Menu:on_wheel_up()
-	self:scroll_to(self.current.scroll_y - self.scroll_step)
+	self:scroll_to(self.current.scroll_y - self.scroll_step * 3)
 	self:on_global_mouse_move() -- selects item below cursor
 	request_render()
 end
 
 function Menu:on_wheel_down()
-	self:scroll_to(self.current.scroll_y + self.scroll_step)
+	self:scroll_to(self.current.scroll_y + self.scroll_step * 3)
 	self:on_global_mouse_move() -- selects item below cursor
 	request_render()
 end
@@ -2127,7 +2145,7 @@ function Menu:render()
 
 			-- Title
 			ass:txt(ax + menu.width / 2, title_ay + (title_height / 2), 5, menu.title, {
-				size = self.font_size, bold = true, color = options.color_background, wrap = 2, opacity = opacity,
+				size = self.font_size, bold = true, color = options.color_background, wrap = 2, opacity = self.opacity,
 				clip = '\\clip(' .. ax .. ',' .. title_ay .. ',' .. bx .. ',' .. ay .. ')',
 			})
 		end
@@ -2355,7 +2373,7 @@ function Speed:render()
 	local speed_text = (round(state.speed * 100) / 100) .. 'x'
 	ass:txt(half_x, ay, 8, speed_text, {
 		size = self.font_size, color = options.color_background_text,
-		border = 1, border_color = options.color_background, opacity = opacity,
+		border = options.text_border, border_color = options.color_background, opacity = opacity,
 	})
 
 	return ass
@@ -2415,7 +2433,8 @@ function Button:render()
 	-- Icon
 	local x, y = round(self.ax + (self.bx - self.ax) / 2), round(self.ay + (self.by - self.ay) / 2)
 	ass:icon(x, y, self.font_size, self.icon, {
-		color = foreground, border = self.active and 0 or 1, border_color = background, opacity = visibility,
+		color = foreground, border = self.active and 0 or options.text_border, border_color = background,
+		opacity = visibility,
 	})
 
 	return ass
@@ -2589,8 +2608,8 @@ function Timeline:init()
 end
 
 function Timeline:get_visibility()
-	return Elements.controls
-		and math.max(Elements.controls.proximity, Element.get_visibility(self)) or Element.get_visibility(self)
+	return Elements.controls and math.max(Elements.controls.proximity, Element.get_visibility(self))
+		or Element.get_visibility(self)
 end
 
 function Timeline:decide_enabled()
@@ -2637,8 +2656,7 @@ function Timeline:get_time_at_x(x)
 end
 
 function Timeline:set_from_cursor()
-	-- add 0.5 to be in the middle of the pixel
-	mp.commandv('seek', self:get_time_at_x(cursor.x + 0.5), 'absolute+exact')
+	mp.commandv('seek', self:get_time_at_x(cursor.x), 'absolute+exact')
 end
 
 function Timeline:on_mbtn_left_down()
@@ -2768,7 +2786,7 @@ function Timeline:render()
 					clip = dots and '\\iclip(' .. foreground_coordinates .. ')' or nil,
 					opacity = options.timeline_chapters_opacity,
 				}
-				
+
 				if dots then
 					local cx, dx = math.max(ax, fax), math.min(bx, fbx)
 					-- 0.5 because clipping coordinates are rounded
@@ -2838,7 +2856,7 @@ function Timeline:render()
 
 	-- Time values
 	if text_opacity > 0 then
-		local opts = {size = self.font_size, opacity = math.min(options.timeline_opacity + 0.1, 1) * text_opacity}
+		local opts = {size = self.font_size, opacity = text_opacity}
 
 		-- Elapsed time
 		if state.time_human then
@@ -2867,8 +2885,7 @@ function Timeline:render()
 
 	-- Hovered time and chapter
 	if (self.proximity_raw == 0 or self.pressed) and not (Elements.speed and Elements.speed.dragging) then
-		-- add 0.5 to be in the middle of the pixel
-		local hovered_seconds = self:get_time_at_x(cursor.x + 0.5)
+		local hovered_seconds = self:get_time_at_x(cursor.x)
 		local chapter_title, chapter_title_width = nil, nil
 
 		if (options.timeline_chapters ~= 'never' and state.chapters) then
@@ -2888,7 +2905,7 @@ function Timeline:render()
 		-- 0.5 to switch when the pixel is half filled in
 		local color = ((fax - 0.5) < cursor.x and cursor.x < (fbx + 0.5)) and
 			options.color_background or options.color_foreground
-		local line = {ax = cursor.x, ay = fay, bx = cursor.x + 1, by = fby}
+		local line = {ax = cursor.x - 0.5, ay = fay, bx = cursor.x + 0.5, by = fby}
 		ass:rect(line.ax, line.ay, line.bx, line.by, {color = color, opacity = 0.2})
 
 		-- Timestamp
@@ -2938,7 +2955,9 @@ function TopBarButton:render()
 
 	local width, height = self.bx - self.ax, self.by - self.ay
 	local icon_size = math.min(width, height) * 0.5
-	ass:icon(self.ax + width / 2, self.ay + height / 2, icon_size, self.icon, {opacity = visibility, border = 1})
+	ass:icon(self.ax + width / 2, self.ay + height / 2, icon_size, self.icon, {
+		opacity = visibility, border = options.text_border,
+	})
 
 	return ass
 end
@@ -3020,9 +3039,9 @@ function TopBar:render()
 	local ass = assdraw.ass_new()
 
 	-- Window title
-	if options.top_bar_title and (state.media_title or state.has_playlist) then
+	if options.top_bar_title and (state.title or state.has_playlist) then
 		local max_bx = self.title_bx - self.spacing
-		local text = state.media_title or 'n/a'
+		local text = state.title or 'n/a'
 		if state.has_playlist then
 			text = string.format('%d/%d - ', state.playlist_pos, state.playlist_count) .. text
 		end
@@ -3112,7 +3131,7 @@ function Controls:serialize()
 		for _, disposition in ipairs(dispositions) do
 			local value = disposition:sub(1, 1) ~= '!'
 			local name = not value and disposition:sub(2) or disposition
-			local prop = (name == 'has_audio' or name == 'has_playlist') and name or 'is_' .. name
+			local prop = name:sub(1, 4) == 'has_' and name or 'is_' .. name
 			if state[prop] ~= value then return false end
 		end
 		return true
@@ -3332,7 +3351,7 @@ function MuteButton:render()
 	local icon_name = state.mute and 'volume_off' or 'volume_up'
 	local width = self.bx - self.ax
 	ass:icon(self.ax + (width / 2), self.by, width * 0.7, icon_name,
-		{border = options.volume_border, opacity = options.volume_opacity * visibility, align = 2}
+		{border = options.text_border, opacity = options.volume_opacity * visibility, align = 2}
 	)
 	return ass
 end
@@ -3350,6 +3369,7 @@ function VolumeSlider:init(props)
 	self.nudge_size = 0
 	self.draw_nudge = false
 	self.spacing = 0
+	self.radius = 1
 end
 
 function VolumeSlider:set_volume(volume)
@@ -3370,6 +3390,7 @@ function VolumeSlider:on_coordinates()
 	self.nudge_size = round(width * 0.18)
 	self.draw_nudge = self.ay < self.nudge_y
 	self.spacing = round(width * 0.2)
+	self.radius = math.max(2, (self.bx - self.ax) / 10)
 end
 function VolumeSlider:on_mbtn_left_down()
 	self.pressed = true
@@ -3385,66 +3406,82 @@ function VolumeSlider:on_wheel_down() self:set_volume(state.volume - options.vol
 
 function VolumeSlider:render()
 	local visibility = self:get_visibility()
-	local width, height = self.bx - self.ax, self.by - self.ay
+	local ax, ay, bx, by = self.ax, self.ay, self.bx, self.by
+	local width, height = bx - ax, by - ay
+
 	if width <= 0 or height <= 0 or visibility <= 0 then return end
+
 	local ass = assdraw.ass_new()
-
 	local nudge_y, nudge_size = self.draw_nudge and self.nudge_y or -infinity, self.nudge_size
-
-	-- Background bar coordinates
-	local bax, bay, bbx, bby = self.ax, self.ay, self.bx, self.by
-
-	-- Foreground bar coordinates
-	local height_without_border = height - (options.volume_border * 2)
-	local fax = self.ax + options.volume_border
-	local fay = self.ay + (height_without_border * (1 - math.min(state.volume / state.volume_max, 1))) +
-		options.volume_border
-	local fbx = self.bx - options.volume_border
-	local fby = self.by - options.volume_border
+	local volume_y = self.ay + options.volume_border +
+		((height - (options.volume_border * 2)) * (1 - math.min(state.volume / state.volume_max, 1)))
 
 	-- Draws a rectangle with nudge at requested position
-	---@param ax number
-	---@param ay number
-	---@param bx number
-	---@param by number
-	function make_nudged_path(ax, ay, bx, by)
-		local fg_path = assdraw.ass_new()
-		fg_path:move_to(bx, by)
-		fg_path:line_to(ax, by)
-		local nudge_bottom_y = nudge_y + nudge_size
-		if ay <= nudge_bottom_y then
-			fg_path:line_to(ax, math.min(nudge_bottom_y))
-			if ay <= nudge_y then
-				fg_path:line_to((ax + nudge_size), nudge_y)
-				local nudge_top_y = nudge_y - nudge_size
-				if ay <= nudge_top_y then
-					fg_path:line_to(ax, nudge_top_y)
-					fg_path:line_to(ax, ay)
-					fg_path:line_to(bx, ay)
-					fg_path:line_to(bx, nudge_top_y)
-				else
-					local triangle_side = ay - nudge_top_y
-					fg_path:line_to((ax + triangle_side), ay)
-					fg_path:line_to((bx - triangle_side), ay)
-				end
-				fg_path:line_to((bx - nudge_size), nudge_y)
-			else
-				local triangle_side = nudge_bottom_y - ay
-				fg_path:line_to((ax + triangle_side), ay)
-				fg_path:line_to((bx - triangle_side), ay)
-			end
-			fg_path:line_to(bx, nudge_bottom_y)
+	---@param p number Padding from slider edges.
+	---@param cy? number A y coordinate where to clip the path from the bottom.
+	function create_nudged_path(p, cy)
+		cy = cy or ay + p
+		local ax, bx, by = ax + p, bx - p, by - p
+		local r = math.max(1, self.radius - p)
+		local d, rh = r * 2, r / 2
+		local nudge_size = ((quarter_pi_sin * (nudge_size - p)) + p) / quarter_pi_sin
+		local path = assdraw.ass_new()
+		path:move_to(bx - r, by)
+		path:line_to(ax + r, by)
+		if cy > by - d then
+			local subtracted_radius = (d - (cy - (by - d))) / 2
+			local xbd = (r - subtracted_radius * 1.35) -- x bezier delta
+			path:bezier_curve(ax + xbd, by, ax + xbd, cy, ax + r, cy)
+			path:line_to(bx - r, cy)
+			path:bezier_curve(bx - xbd, cy, bx - xbd, by, bx - r, by)
 		else
-			fg_path:line_to(ax, ay)
-			fg_path:line_to(bx, ay)
+			path:bezier_curve(ax + rh, by, ax, by - rh, ax, by - r)
+			local nudge_bottom_y = nudge_y + nudge_size
+
+			if cy + rh <= nudge_bottom_y then
+				path:line_to(ax, nudge_bottom_y)
+				if cy <= nudge_y then
+					path:line_to((ax + nudge_size), nudge_y)
+					local nudge_top_y = nudge_y - nudge_size
+					if cy <= nudge_top_y then
+						local r, rh = r, rh
+						if cy > nudge_top_y - r then
+							r = nudge_top_y - cy
+							rh = r / 2
+						end
+						path:line_to(ax, nudge_top_y)
+						path:line_to(ax, cy + r)
+						path:bezier_curve(ax, cy + rh, ax + rh, cy, ax + r, cy)
+						path:line_to(bx - r, cy)
+						path:bezier_curve(bx - rh, cy, bx, cy + rh, bx, cy + r)
+						path:line_to(bx, nudge_top_y)
+					else
+						local triangle_side = cy - nudge_top_y
+						path:line_to((ax + triangle_side), cy)
+						path:line_to((bx - triangle_side), cy)
+					end
+					path:line_to((bx - nudge_size), nudge_y)
+				else
+					local triangle_side = nudge_bottom_y - cy
+					path:line_to((ax + triangle_side), cy)
+					path:line_to((bx - triangle_side), cy)
+				end
+				path:line_to(bx, nudge_bottom_y)
+			else
+				path:line_to(ax, cy + r)
+				path:bezier_curve(ax, cy + rh, ax + rh, cy, ax + r, cy)
+				path:line_to(bx - r, cy)
+				path:bezier_curve(bx - rh, cy, bx, cy + rh, bx, cy + r)
+			end
+			path:line_to(bx, by - r)
+			path:bezier_curve(bx, by - rh, bx - rh, by, bx - r, by)
 		end
-		fg_path:line_to(bx, by)
-		return fg_path
+		return path
 	end
 
-	-- FG & BG paths
-	local fg_path = make_nudged_path(fax, fay, fbx, fby)
-	local bg_path = make_nudged_path(bax, bay, bbx, bby)
+	-- BG & FG paths
+	local bg_path = create_nudged_path(0)
+	local fg_path = create_nudged_path(options.volume_border, volume_y)
 
 	-- Background
 	ass:new_event()
@@ -3468,16 +3505,15 @@ function VolumeSlider:render()
 	-- Current volume value
 	local volume_string = tostring(round(state.volume * 10) / 10)
 	local font_size = round(((width * 0.6) - (#volume_string * (width / 20))) * options.font_scale)
-	local opacity = math.min(options.volume_opacity + 0.1, 1) * visibility
-	if fay < self.by - self.spacing then
+	if volume_y < self.by - self.spacing then
 		ass:txt(self.ax + (width / 2), self.by - self.spacing, 2, volume_string, {
-			size = font_size, color = options.color_foreground_text, opacity = opacity,
+			size = font_size, color = options.color_foreground_text, opacity = visibility,
 			clip = '\\clip(' .. fg_path.scale .. ', ' .. fg_path.text .. ')',
 		})
 	end
-	if fay > self.by - self.spacing - font_size then
+	if volume_y > self.by - self.spacing - font_size then
 		ass:txt(self.ax + (width / 2), self.by - self.spacing, 2, volume_string, {
-			size = font_size, color = options.color_background_text, opacity = opacity,
+			size = font_size, color = options.color_background_text, opacity = visibility,
 			clip = '\\iclip(' .. fg_path.scale .. ', ' .. fg_path.text .. ')',
 		})
 	end
@@ -3485,9 +3521,7 @@ function VolumeSlider:render()
 	-- Disabled stripes for no audio
 	if not state.has_audio then
 		-- Create 100 foreground clip path
-		local f100ax, f100ay = self.ax + options.volume_border, self.ay + options.volume_border
-		local f100bx, f100by = self.bx - options.volume_border, self.by - options.volume_border
-		local fg_100_path = make_nudged_path(f100ax, f100ay, f100bx, f100by)
+		local fg_100_path = create_nudged_path(options.volume_border)
 
 		-- Render stripes
 		local stripe_height = 12
@@ -3500,7 +3534,7 @@ function VolumeSlider:render()
 			ass:new_event()
 			ass:append('{\\blur0\\bord0\\shad0\\1c&H' .. color ..
 				'\\clip(' .. fg_100_path.scale .. ',' .. fg_100_path.text .. ')}')
-			ass:opacity(0.15 * opacity)
+			ass:opacity(0.15 * visibility)
 			ass:pos(0, 0)
 			ass:draw_start()
 
@@ -3529,6 +3563,10 @@ function Volume:init()
 	Element.init(self, 'volume')
 	self.mute = MuteButton:new({anchor_id = 'volume'})
 	self.slider = VolumeSlider:new({anchor_id = 'volume'})
+end
+
+function Volume:get_visibility()
+	return self.slider.pressed and 1 or Element.get_visibility(self)
 end
 
 function Volume:update_dimensions()
@@ -3619,8 +3657,9 @@ function update_cursor_position()
 	local dpi_scale = mp.get_property_native('display-hidpi-scale', 1.0)
 	dpi_scale = dpi_scale * options.ui_scale
 
-	cursor.x = cursor.x / dpi_scale
-	cursor.y = cursor.y / dpi_scale
+	-- add 0.5 to be in the middle of the pixel
+	cursor.x = (cursor.x + 0.5) / dpi_scale
+	cursor.y = (cursor.y + 0.5) / dpi_scale
 
 	Elements:update_proximities()
 	request_render()
@@ -4029,16 +4068,29 @@ end
 mp.set_key_bindings(mouse_keybinds, 'mouse_movement', 'force')
 mp.enable_key_bindings('mouse_movement', 'allow-vo-dragging+allow-hide-cursor')
 
-mp.register_event('file-loaded', parse_chapters)
+function update_title(title_template)
+	if title_template:sub(-6) == ' - mpv' then title_template = title_template:sub(1, -7) end
+	set_state('title', mp.command_native({'expand-text', title_template}))
+end
+mp.register_event('file-loaded', function()
+	parse_chapters()
+	update_title(mp.get_property_native('title'))
+end)
+mp.register_event('end-file ', function() set_state('title', nil) end)
+mp.observe_property('title', 'string', function(_, title)
+	-- Don't change title if there is currently none
+	if state.title then update_title(title) end
+end)
 mp.observe_property('playback-time', 'number', create_state_setter('time', update_human_times))
 mp.observe_property('duration', 'number', create_state_setter('duration', update_human_times))
 mp.observe_property('speed', 'number', create_state_setter('speed', update_human_times))
 mp.observe_property('track-list', 'native', function(name, value)
 	-- checks the file dispositions
 	local path = mp.get_property_native('path')
-	local has_audio, is_video, is_image = false, false, false
+	local has_audio, has_sub, is_video, is_image = false, false, false, false
 	for _, track in ipairs(value) do
 		if track.type == 'audio' then has_audio = true end
+		if track.type == 'sub' then has_sub = true end
 		if track.type == 'video' then
 			is_image = track.image
 			if not is_image and not track.albumart then
@@ -4049,15 +4101,19 @@ mp.observe_property('track-list', 'native', function(name, value)
 	set_state('is_audio', not is_video and has_audio)
 	set_state('is_image', is_image)
 	set_state('has_audio', has_audio)
+	set_state('has_sub', has_sub)
 	set_state('is_video', is_video)
 	set_state('is_stream', is_protocol(path))
 	Elements:trigger('dispositions')
 end)
-mp.observe_property('chapter-list', 'native', parse_chapters)
+mp.observe_property('chapter-list', 'native', function(_, chapters)
+	set_state('has_chapter', #chapters > 0)
+	Elements:trigger('dispositions')
+	parse_chapters(chapters)
+end)
 mp.observe_property('border', 'bool', create_state_setter('border'))
 mp.observe_property('ab-loop-a', 'number', create_state_setter('ab_loop_a'))
 mp.observe_property('ab-loop-b', 'number', create_state_setter('ab_loop_b'))
-mp.observe_property('media-title', 'string', create_state_setter('media_title'))
 mp.observe_property('playlist-pos-1', 'number', create_state_setter('playlist_pos'))
 mp.observe_property('playlist-count', 'number', function(_, value)
 	set_state('playlist_count', value)
@@ -4090,13 +4146,10 @@ mp.observe_property('estimated-display-fps', 'native', update_render_delay)
 
 -- KEY BINDABLE FEATURES
 
-mp.add_key_binding(nil, 'peek-timeline', function()
-	if Elements.timeline.proximity > 0.5 then
-		Elements.timeline:tween_property('proximity', Elements.timeline.proximity, 0)
-	else
-		Elements.timeline:tween_property('proximity', Elements.timeline.proximity, 1)
-	end
-end)
+mp.add_key_binding(nil, 'peek-ui', function() Elements:peek({'timeline', 'controls', 'volume', 'top_bar'}) end)
+mp.add_key_binding(nil, 'peek-timeline', function() Elements:peek({'timeline'}) end)
+mp.add_key_binding(nil, 'peek-volume', function() Elements:peek({'volume'}) end)
+mp.add_key_binding(nil, 'peek-top-bar', function() Elements:peek({'top_bar'}) end)
 mp.add_key_binding(nil, 'toggle-progress', function()
 	local timeline = Elements.timeline
 	if timeline.size_min_override then
