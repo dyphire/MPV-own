@@ -14,6 +14,7 @@ local mp = require 'mp'
 local utils = require 'mp.utils'
 local msg = require 'mp.msg'
 local assdraw = require 'mp.assdraw'
+local opt = require('mp.options')
 
 local opts = {
     --key bindings
@@ -21,6 +22,9 @@ local opts = {
     down_binding = "DOWN WHEEL_DOWN",
     select_binding = "ENTER MBTN_LEFT",
     close_menu_binding = "ESC MBTN_RIGHT Ctrl+f Alt+f",
+
+    --youtube-dl version(could be youtube-dl or yt-dlp, or something else)
+    ytdl_ver = "yt-dlp",
 
     --formatting / cursors
     selected_and_active     = "▶  - ",
@@ -48,9 +52,30 @@ local opts = {
     --setting this to 0 deactivates the timeout
     menu_timeout = 6,
 
+    --use youtube-dl to fetch a list of available formats (overrides quality_strings)
+    fetch_formats = true,
+
+    --default menu entries
+    quality_strings=[[
+    [
+    {"4320p" : "bestvideo[height<=?4320p]+bestaudio/best"},
+    {"2160p" : "bestvideo[height<=?2160]+bestaudio/best"},
+    {"1440p" : "bestvideo[height<=?1440]+bestaudio/best"},
+    {"1080p" : "bestvideo[height<=?1080]+bestaudio/best"},
+    {"720p" : "bestvideo[height<=?720]+bestaudio/best"},
+    {"480p" : "bestvideo[height<=?480]+bestaudio/best"},
+    {"360p" : "bestvideo[height<=?360]+bestaudio/best"},
+    {"240p" : "bestvideo[height<=?240]+bestaudio/best"},
+    {"144p" : "bestvideo[height<=?144]+bestaudio/best"}
+    ]
+    ]],
+
     --reset ytdl-format to the original format string when changing files (e.g. going to the next playlist entry)
     --if file was opened previously, reset to previously selected format
     reset_format = true,
+
+    --automatically fetch available formats when opening an url
+    fetch_on_start = true,
 
     --show the video format menu after opening an url
     start_with_menu = false,
@@ -95,7 +120,8 @@ local opts = {
     sort_video = 'height,fps,tbr,size,format_id',
     sort_audio = 'asr,tbr,size,format_id',
 }
-(require 'mp.options').read_options(opts, "quality-menu")
+opt.read_options(opts, "quality-menu")
+opts.quality_strings = utils.parse_json(opts.quality_strings)
 
 -- special thanks to reload.lua (https://github.com/4e6/mpv-reload/)
 local function reload_resume()
@@ -358,6 +384,50 @@ local function process_json_string(url, json)
     return vres, ares , vfmt, afmt
 end
 
+local function download_formats(url)
+
+    mp.osd_message("fetching available formats with youtube-dl...", 60)
+
+    if not (ytdl.searched) then
+        local ytdl_mcd = mp.find_config_file(opts.ytdl_ver)
+        if not (ytdl_mcd == nil) then
+            msg.verbose("found youtube-dl at: " .. ytdl_mcd)
+            ytdl.path = ytdl_mcd
+        end
+        ytdl.searched = true
+    end
+
+    local function exec(args)
+        local res, err = mp.command_native({name = "subprocess", args = args, capture_stdout = true, capture_stderr = true})
+        return res.status, res.stdout, res.stderr
+    end
+
+    local ytdl_format = mp.get_property("ytdl-format")
+    local command = nil
+    if (ytdl_format == nil or ytdl_format == "") then
+        command = {ytdl.path, "--no-warnings", "--no-playlist", "-J", url}
+    else
+        command = {ytdl.path, "--no-warnings", "--no-playlist", "-J", "-f", ytdl_format, url}
+    end
+
+    msg.verbose("calling youtube-dl with command: " .. table.concat(command, " "))
+
+    local es, stdout, stderr = exec(command)
+
+    if (es < 0) or (stdout == nil) or (stdout == "") then
+        mp.osd_message("fetching formats failed...", 2)
+        msg.error("failed to get format list: " .. es)
+        msg.error("stderr: " .. stderr)
+        return
+    end
+
+    msg.verbose("youtube-dl succeeded!")
+    mp.osd_message("", 0)
+
+    local vres, ares , vfmt, afmt = process_json_string(url, stdout)
+    return vres, ares , vfmt, afmt
+end
+
 local function get_url()
     local path = mp.get_property("path")
     path = string.gsub(path, "ytdl://", "") -- Strip possible ytdl:// prefix.
@@ -376,7 +446,6 @@ end
 
 local queue_callback_video = {}
 local queue_callback_audio = {}
-local queue_video_menu = false
 local function get_formats()
 
     local url = get_url()
@@ -389,7 +458,29 @@ local function get_formats()
         return data.voptions, data.aoptions, data.vfmt, data.afmt, url
     end
 
-    queue_video_menu = true
+    if opts.fetch_formats == false then
+        local vres = {}
+        for i,v in ipairs(opts.quality_strings) do
+            for k,v2 in pairs(v) do
+                vres[i] = {label = k, format=v2}
+            end
+        end
+        url_data[url] = {voptions=vres, aoptions={}, vfmt=nil, afmt=nil}
+        return vres, {}, nil, nil, url
+    end
+
+    local vres, ares , vfmt, afmt = download_formats(url)
+
+    for _, script_name in ipairs(queue_callback_video[url] or {}) do
+        send_formats_to('video', url, script_name, vres, vfmt)
+    end
+    for _, script_name in ipairs(queue_callback_audio[url] or {}) do
+        send_formats_to('audio', url, script_name, ares, afmt)
+    end
+
+    queue_callback_video[url] = nil
+    queue_callback_audio[url] = nil
+    return vres, ares , vfmt, afmt, url
 end
 
 local function format_string(vfmt, afmt)
@@ -649,6 +740,8 @@ local function file_start()
     end
     if opts.start_with_menu and new_path ~= path then
         video_formats_toggle()
+    elseif opts.fetch_on_start and not data then
+        download_formats(new_path)
     end
     path = new_path
 end
@@ -692,26 +785,8 @@ end)
 
 -- check if uosc is running
 mp.register_script_message('uosc-version', function(version)
-	uosc = true
+    version = tonumber((version:gsub('%.', '')))
+---@diagnostic disable-next-line: cast-local-type
+    uosc = version and version >= 400
 end)
 mp.commandv('script-message-to', 'uosc', 'get-version', mp.get_script_name())
-
-mp.register_script_message('ytdl_json', function(url, json)
-    process_json_string(url, json)
-
-    local data = url_data[url]
-    for _, script_name in ipairs(queue_callback_video[url] or {}) do
-        send_formats_to('video', url, script_name, data.voptions, data.vfmt)
-    end
-    for _, script_name in ipairs(queue_callback_audio[url] or {}) do
-        send_formats_to('audio', url, script_name, data.aoptions, data.afmt)
-    end
-
-    queue_callback_video[url] = nil
-    queue_callback_audio[url] = nil
-
-    if queue_video_menu then
-        queue_video_menu = false
-        video_formats_toggle()
-    end
-end)

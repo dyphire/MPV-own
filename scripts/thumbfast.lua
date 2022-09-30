@@ -68,8 +68,9 @@ local last_request_time = nil
 local last_display_time = 0
 
 local effective_w = options.max_width
-local effective_h = options.max_height
-local thumb_size = effective_w * effective_h * 4
+local generate_h = options.max_height
+local render_h = generate_h
+local thumb_size = effective_w * generate_h * 4
 
 local filters_reset = {["lavfi-crop"]=true, crop=true}
 local filters_runtime = {hflip=true, vflip=true}
@@ -154,7 +155,7 @@ local function vf_string(filters, full)
     end
 
     if full then
-        vf = vf.."scale=w="..effective_w..":h="..effective_h..par..",pad=w="..effective_w..":h="..effective_h..":x=(ow-iw)/2:y=(oh-ih)/2,format=bgra"
+        vf = vf.."scale=w="..effective_w..":h="..generate_h..par..",pad=w="..effective_w..":h="..generate_h..",format=bgra"
     end
 
     return vf
@@ -168,14 +169,15 @@ local function calc_dimensions()
     local scale = mp.get_property_number("display-hidpi-scale", 1)
 
     if width / height > options.max_width / options.max_height then
-        effective_w = math.floor(options.max_width * scale + 0.5)
-        effective_h = math.floor(height / width * effective_w + 0.5)
+        effective_w = math.floor(options.max_width * scale / 2) * 2
     else
-        effective_h = math.floor(options.max_height * scale + 0.5)
-        effective_w = math.floor(width / height * effective_h + 0.5)
+        local target_h = math.floor(options.max_height * scale + 0.5)
+        effective_w = math.floor(width / height * target_h / 2) * 2
     end
+    generate_h = math.ceil(height / width * effective_w / 2) * 2
+    render_h = math.floor(height / width * effective_w + 0.5)
 
-    thumb_size = effective_w * effective_h * 4
+    thumb_size = effective_w * generate_h * 4
 
     local v_par = mp.get_property_number("video-out-params/par", 1)
     if v_par == 1 then
@@ -186,13 +188,18 @@ local function calc_dimensions()
 end
 
 local function info()
-    local display_w, display_h = effective_w, effective_h
+    local display_w, display_h = effective_w, render_h
     if mp.get_property_number("video-params/rotate", 0) % 180 == 90 then
-        display_w, display_h = effective_h, effective_w
+        display_w, display_h = render_h, effective_w
     end
 
     local json, err = mp.utils.format_json({width=display_w, height=display_h, disabled=disabled, socket=options.socket, thumbnail=options.thumbnail, overlay_id=options.overlay_id})
     mp.commandv("script-message", "thumbfast-info", json)
+end
+
+local function remove_thumbnail_files()
+    os.remove(options.thumbnail)
+    os.remove(options.thumbnail..".bgra")
 end
 
 local function spawn(time)
@@ -240,8 +247,7 @@ local function spawn(time)
         init = true
     end
 
-    os.remove(options.thumbnail)
-    os.remove(options.thumbnail..".bgra")
+    remove_thumbnail_files()
 
     calc_dimensions()
 
@@ -256,7 +262,7 @@ local function spawn(time)
             "--ytdl-format=worst", "--demuxer-readahead-secs=0", "--demuxer-max-bytes=128KiB",
             "--vd-lavc-skiploopfilter=all", "--vd-lavc-software-fallback=1", "--vd-lavc-fast",
             "--vf="..vf_string(filters_all, true),
-            "--sws-allow-zimg=no", "--sws-fast=yes",
+            "--sws-allow-zimg=no", "--sws-fast=yes", "--sws-scaler=fast-bilinear",
             "--video-rotate="..last_rotate,
             "--ovc=rawvideo", "--of=image2", "--ofopts=update=1", "--o="..options.thumbnail
         }},
@@ -395,7 +401,7 @@ local function thumb(time, r_x, r_y, script)
         last_index = index
         if x ~= last_x or y ~= last_y then
             last_x, last_y = x, y
-            display_img(effective_w, effective_h, time, mp.get_time(), script, true)
+            display_img(effective_w, render_h, time, mp.get_time(), script, true)
         end
         return
     end
@@ -409,13 +415,13 @@ local function thumb(time, r_x, r_y, script)
     if not spawned then
         spawn(seek_time)
         if can_generate then
-            display_img(effective_w, effective_h, time, cur_request_time, script)
-            mp.add_timeout(0.15, function() display_img(effective_w, effective_h, time, cur_request_time, script) end)
+            display_img(effective_w, render_h, time, cur_request_time, script)
+            mp.add_timeout(0.15, function() display_img(effective_w, render_h, time, cur_request_time, script) end)
             end
         return
     end
 
-    run("async seek "..seek_time.." absolute+keyframes", function() if can_generate then display_img(effective_w, effective_h, time, cur_request_time, script) end end)
+    run("async seek "..seek_time.." absolute+keyframes", function() if can_generate then display_img(effective_w, render_h, time, cur_request_time, script) end end)
 end
 
 local function clear()
@@ -430,7 +436,7 @@ end
 
 local function watch_changes()
     local old_w = effective_w
-    local old_h = effective_h
+    local old_h = generate_h
 
     calc_dimensions()
 
@@ -438,7 +444,7 @@ local function watch_changes()
     local rotate = mp.get_property_number("video-rotate", 0)
 
     if spawned then
-        if old_w ~= effective_w or old_h ~= effective_h or last_vf_reset ~= vf_reset or (last_rotate % 180) ~= (rotate % 180) or par ~= last_par then
+        if old_w ~= effective_w or old_h ~= generate_h or last_vf_reset ~= vf_reset or (last_rotate % 180) ~= (rotate % 180) or par ~= last_par then
             last_rotate = rotate
             -- mpv doesn't allow us to change output size
             run("quit")
@@ -457,7 +463,7 @@ local function watch_changes()
             end
         end
     else
-        if old_w ~= effective_w or old_h ~= effective_h or last_vf_reset ~= vf_reset or (last_rotate % 180) ~= (rotate % 180) or par ~= last_par then
+        if old_w ~= effective_w or old_h ~= generate_h or last_vf_reset ~= vf_reset or (last_rotate % 180) ~= (rotate % 180) or par ~= last_par then
             last_rotate = rotate
             info()
         end
@@ -492,6 +498,12 @@ local function file_load()
     if options.spawn_first then spawn(mp.get_property_number("time-pos", 0)) end
 end
 
+local function shutdown()
+    run("quit")
+    remove_thumbnail_files()
+    os.remove(options.socket)
+end
+
 mp.observe_property("display-hidpi-scale", "native", watch_changes)
 mp.observe_property("video-out-params", "native", watch_changes)
 mp.observe_property("vf", "native", watch_changes)
@@ -502,3 +514,4 @@ mp.register_script_message("thumb", thumb)
 mp.register_script_message("clear", clear)
 
 mp.register_event("file-loaded", file_load)
+mp.register_event("shutdown", shutdown)
