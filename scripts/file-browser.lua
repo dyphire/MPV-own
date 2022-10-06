@@ -89,6 +89,9 @@ local o = {
     --directory to load external modules - currently just user-input-module
     module_directory = "~~/script-modules",
 
+    --enable script-message to control the idlescreen
+    toggle_idlescreen = false,
+
     --force file-browser to use a specific text alignment (default: top-left)
     --uses ass tag alignment numbers: https://aegi.vmoe.info/docs/3.0/ASS_Tags/#index23h3
     --set to 0 to use the default mpv osd-align options
@@ -755,14 +758,15 @@ local function update_ass()
         elseif i == state.selected then append(style.selected) end
 
         --prints the currently-playing icon and style
-        if playing_file and multiselected then append(style.playing_selected)
-        elseif playing_file then append(style.playing) end
+        if playing_file then append( multiselected and style.playing_selected or style.playing) end
 
         --sets the folder icon
-        if v.type == 'dir' then append(style.folder..o.folder_icon.."\\h") end
+        if v.type == 'dir' then
+            append(style.folder..o.folder_icon.."\\h"..style.body)
+            if playing_file then append( multiselected and style.playing_selected or style.playing) end
+        end
 
         --adds the actual name of the item
-        append(style.body)
         append(v.ass or API.ass_escape(v.label or v.name, true))
         newline()
     end
@@ -1120,6 +1124,7 @@ local function open()
     end
 
     utils.shared_script_property_set("file_browser-open", "yes")
+    if o.toggle_idlescreen then mp.commandv('script-message', 'osc-idlescreen', 'no', 'no_osd') end
     state.hidden = false
     if state.directory == nil then
         local path = mp.get_property('path')
@@ -1142,6 +1147,7 @@ local function close()
     end
 
     utils.shared_script_property_set("file_browser-open", "no")
+    if o.toggle_idlescreen then mp.commandv('script-message', 'osc-idlescreen', 'yes', 'no_osd') end
     state.hidden = true
     ass:remove()
 end
