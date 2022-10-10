@@ -89,7 +89,7 @@ local o = {
     --directory to load external modules - currently just user-input-module
     module_directory = "~~/script-modules",
 
-    --enable script-message to control the idlescreen
+    --turn the OSC idle screen off and on when opening and closing the browser
     toggle_idlescreen = false,
 
     --force file-browser to use a specific text alignment (default: top-left)
