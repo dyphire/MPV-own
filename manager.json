@@ -65,6 +65,12 @@
     "branch":"main"
   },
   {
+    "git":"https://github.com/dyphire/mpv-playlistmanager",
+    "whitelist":"%.lua$",
+    "dest":"~~/scripts",
+    "branch":"dev"
+  },
+  {
     "git":"https://github.com/dyphire/MPVMediaControl",
     "whitelist":"%.lua$",
     "dest":"~~/scripts"
@@ -109,11 +115,6 @@
     "whitelist":"%.lua$",
     "dest":"~~/scripts",
     "branch":"main"
-  },
-  {
-    "git":"https://github.com/jonniek/mpv-playlistmanager",
-    "whitelist":"%.lua$",
-    "dest":"~~/scripts"
   },
   {
     "git":"https://github.com/CogentRedTester/mpv-file-browser",
